@@ -109,6 +109,7 @@ class AgentRunner:
         print("  clear             - 清空当前 Agent 历史")
         print("  prompt <text>     - 设置系统提示词")
         print("  quit/exit         - 退出程序")
+        print("  temperature [0, 2) - 设置代理多样性"  )
         print("  <任意文字>        - 与当前 Agent 对话\n")
         
         # 如果没有 Agent，提示注册
@@ -135,7 +136,10 @@ class AgentRunner:
                 elif user_input.lower().startswith("switch "):
                     name = user_input[7:].strip()
                     self.switch_agent(name)
-                
+                elif user_input.lower().startswith("temperature "):
+                    new_temperature = user_input[12:].strip()
+                    self.current_agent.temperature = float(new_temperature)
+                    print("temperature: ", new_temperature)
                 elif user_input.lower() == "clear":
                     self.clear_history()
                 

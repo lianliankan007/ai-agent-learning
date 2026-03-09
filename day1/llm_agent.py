@@ -21,7 +21,7 @@ class LLMAgent:
         api_key: Optional[str] = None,
         base_url: str = "https://coding.dashscope.aliyuncs.com/v1",
         model: str = "qwen3.5-plus",
-        temperature: float = 0.7,
+        temperature: float = 1.9,
         max_tokens: int = 1000
     ):
         """
