@@ -23,7 +23,7 @@ class FunctionCallingAgent:
         base_url: str = "https://coding.dashscope.aliyuncs.com/v1",
         model: str = "qwen3.5-plus",
         temperature: float = 0.2,
-        max_tokens: int = 1000,
+        max_tokens: int = 100,
     ):
         self.api_key = api_key or os.getenv("OPENAI_API_KEY")
         if not self.api_key:
@@ -126,6 +126,8 @@ class FunctionCallingAgent:
             print(f"llm payload before request：{payload}")
             response = requests.post(url, headers=headers, json=payload, timeout=60)
             response.raise_for_status()
+            print(f"llm native after response：{payload}")
+
             result = response.json()
             return result["choices"][0]["message"]
         except requests.exceptions.RequestException as exc:
