@@ -6,20 +6,32 @@ day3: 基于 day1 风格的 function calling 示例
   set OPENAI_API_KEY=your_api_key
 """
 
+from __future__ import annotations
+
 import json
 import os
+import sys
+import time
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 import requests
 from dotenv import load_dotenv
 
-# Load environment variables from .env if present
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from utils.llm_markdown_logger import get_default_llm_logger
+
 load_dotenv()
+
+llm_logger = get_default_llm_logger()
 
 
 class FunctionCallingAgent:
-    """使用 OpenAI 兼容接口演示 function calling。"""
+    """使用兼容 OpenAI 的接口演示 function calling。"""
 
     def __init__(
         self,
@@ -51,7 +63,7 @@ class FunctionCallingAgent:
         self.messages = []
 
     def list_tools(self) -> None:
-        print("\n📋 可用 Functions:")
+        print("\n可用 Functions:")
         for tool in self.tool_definitions:
             function_info = tool["function"]
             print(f"  - {function_info['name']}: {function_info['description']}")
@@ -63,18 +75,14 @@ class FunctionCallingAgent:
         system_prompt: str = "你是一个会在必要时主动调用工具解决问题的助手。",
     ) -> str:
         messages: List[Dict[str, Any]] = []
-
         if system_prompt:
             messages.append({"role": "system", "content": system_prompt})
-
         messages.extend(self.messages)
         messages.append({"role": "user", "content": user_message})
 
         while True:
-            print(f"llm messages before function：{messages}")
             response_message = self._call_api(messages, tools=self.tool_definitions)
             messages.append(response_message)
-            print(f"llm response before function：{response_message}")
 
             tool_calls = response_message.get("tool_calls") or []
             if not tool_calls:
@@ -88,13 +96,13 @@ class FunctionCallingAgent:
                 function_name = function_info["name"]
                 arguments_text = function_info.get("arguments", "{}")
                 arguments = json.loads(arguments_text)
-                print(f"🔧 调用函数: {function_name}({arguments})")
+                print(f"调用函数: {function_name}({arguments})")
 
                 if function_name not in self.tool_registry:
                     tool_result = f"未找到函数: {function_name}"
                 else:
                     tool_result = self.tool_registry[function_name](**arguments)
-                print(f"🛠️ 函数结果: {tool_result}")
+                print(f"函数结果: {tool_result}")
 
                 messages.append(
                     {
@@ -123,36 +131,72 @@ class FunctionCallingAgent:
             payload["tools"] = tools
             payload["tool_choice"] = "auto"
 
-
-
-
         try:
-            print(f"llm payload before request：{payload}")
+            start_time = time.perf_counter()
             response = requests.post(url, headers=headers, json=payload, timeout=60)
+            elapsed_ms = (time.perf_counter() - start_time) * 1000
             response.raise_for_status()
-            print(f"llm native after response：{payload}")
 
             result = response.json()
+            llm_logger.log_exchange(
+                provider="dashscope-compatible",
+                model=self.model,
+                endpoint=url,
+                request_payload=payload,
+                request_headers=headers,
+                response_payload=result,
+                status_code=response.status_code,
+                duration_ms=elapsed_ms,
+                extra={"agent_name": "FunctionCallingAgent"},
+            )
             return result["choices"][0]["message"]
         except requests.exceptions.RequestException as exc:
+            response = getattr(exc, "response", None)
+            llm_logger.log_exchange(
+                provider="dashscope-compatible",
+                model=self.model,
+                endpoint=url,
+                request_payload=payload,
+                request_headers=headers,
+                response_payload=self._safe_json(response) if response is not None else None,
+                status_code=response.status_code if response is not None else None,
+                error=str(exc),
+                extra={"agent_name": "FunctionCallingAgent"},
+            )
             raise Exception(f"API 调用失败: {exc}") from exc
-        except (KeyError, IndexError) as exc:
+        except (KeyError, IndexError, ValueError) as exc:
+            llm_logger.log_exchange(
+                provider="dashscope-compatible",
+                model=self.model,
+                endpoint=url,
+                request_payload=payload,
+                request_headers=headers,
+                error=f"response_parse_error: {exc}",
+                extra={"agent_name": "FunctionCallingAgent"},
+            )
             raise Exception(f"解析响应失败: {exc}") from exc
+
+    @staticmethod
+    def _safe_json(response: Optional[requests.Response]) -> Any:
+        if response is None:
+            return None
+        try:
+            return response.json()
+        except ValueError:
+            return {"raw_text": response.text}
 
 
 def get_weather(city: str) -> str:
-    """模拟天气查询。"""
     weather_map = {
         "北京": "晴，18°C，东北风 2 级",
         "上海": "多云，22°C，东南风 3 级",
         "杭州": "小雨，20°C，东北风 2 级",
         "深圳": "晴，27°C，南风 3 级",
     }
-    return weather_map.get(city, f"{city} 暂无内置天气数据，你可以返回“未查询到天气”")
+    return weather_map.get(city, f"{city} 暂无内置天气数据，你可以返回“未查询到天气”。")
 
 
 def get_current_time(city: str) -> str:
-    """模拟时间查询。"""
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     return f"{city} 当前时间: {now}"
 
@@ -197,19 +241,17 @@ def build_tools() -> List[Dict[str, Any]]:
 
 
 class FunctionCallingRunner:
-    """交互式运行器，风格参考 day1。"""
-
     def __init__(self, agent: FunctionCallingAgent):
         self.agent = agent
         self.system_prompt = "你是一个会在必要时主动调用工具解决问题的助手。"
 
     def set_system_prompt(self, prompt: str) -> None:
         self.system_prompt = prompt
-        print("📝 系统提示词已更新")
+        print("system prompt 已更新")
 
     def run(self) -> None:
         print("=" * 60)
-        print("🤖 Day3 Function Calling 对话系统")
+        print("Day3 Function Calling 对话系统")
         print("=" * 60)
         print("\n可用命令:")
         print("  list-tools         - 列出所有可用函数")
@@ -226,7 +268,7 @@ class FunctionCallingRunner:
                     continue
 
                 if user_input.lower() in ["quit", "exit"]:
-                    print("\n👋 再见!")
+                    print("\n再见!")
                     break
 
                 if user_input.lower() == "list-tools":
@@ -235,7 +277,7 @@ class FunctionCallingRunner:
 
                 if user_input.lower() == "clear":
                     self.agent.clear_history()
-                    print("🗑️ 对话历史已清空")
+                    print("对话历史已清空")
                     continue
 
                 if user_input.lower().startswith("prompt "):
@@ -248,16 +290,17 @@ class FunctionCallingRunner:
                     print(f"temperature: {new_temperature}")
                     continue
 
-                print("\n🤖 [function-agent] 思考中...")
+                print("\n[function-agent] 思考中...")
                 answer = self.agent.chat_with_functions(
-                    user_input, system_prompt=self.system_prompt
+                    user_input,
+                    system_prompt=self.system_prompt,
                 )
                 print(f"AI: {answer}\n")
             except KeyboardInterrupt:
-                print("\n\n👋 再见!")
+                print("\n\n再见!")
                 break
             except Exception as exc:
-                print(f"\n❌ 错误: {exc}\n")
+                print(f"\n错误: {exc}\n")
 
 
 def main() -> None:

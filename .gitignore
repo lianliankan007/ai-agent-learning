@@ -10,6 +10,7 @@ __pycache__/
 dist/
 build/
 *.log
+logs/
 *.sqlite3
 .vscode/
 .idea/

@@ -1,26 +1,34 @@
 #!/usr/bin/env python3
 """
 Day 2 LLM Agent 模块
-在 Day 1 基础上扩展：
-1) 参数控制（temperature / top_p / max_tokens）
-2) 多轮上下文管理（窗口 + 摘要）
-3) 错误处理与重试（网络异常、限流、5xx）
+在 Day 1 基础上增加参数控制、重试和历史压缩。
 """
+
+from __future__ import annotations
 
 import os
 import random
+import sys
 import time
-from typing import Optional, List, Dict, Any
+from pathlib import Path
+from typing import Any, Dict, List, Optional
 
 import requests
 from dotenv import load_dotenv
 
-# Load environment variables from a .env file if present
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from utils.llm_markdown_logger import get_default_llm_logger
+
 load_dotenv()
+
+llm_logger = get_default_llm_logger()
 
 
 class LLMAgent:
-    """LLM Agent 类，负责调用 API、维护历史、处理重试。"""
+    """负责调用 API、维护历史，并在失败时按策略重试。"""
 
     def __init__(
         self,
@@ -45,11 +53,9 @@ class LLMAgent:
         self.temperature = temperature
         self.top_p = top_p
         self.max_tokens = max_tokens
-
         self.timeout = timeout
         self.max_retries = max_retries
         self.max_history_messages = max_history_messages
-
         self.messages: List[Dict[str, str]] = []
 
     def chat(
@@ -61,7 +67,6 @@ class LLMAgent:
         top_p: Optional[float] = None,
         max_tokens: Optional[int] = None,
     ) -> str:
-        """发送消息并返回回复。"""
         messages = self._build_messages(message=message, system_prompt=system_prompt)
         response = self._call_api(
             messages=messages,
@@ -73,8 +78,6 @@ class LLMAgent:
 
         self.messages.append({"role": "user", "content": message})
         self.messages.append({"role": "assistant", "content": response})
-
-        # 对话过长时压缩
         self._compress_history_if_needed(system_prompt=system_prompt)
         return response
 
@@ -83,7 +86,6 @@ class LLMAgent:
         prompt: str,
         system_prompt: Optional[str] = "你是简洁清晰的学习助教。",
     ) -> List[Dict[str, Any]]:
-        """固定同一 prompt，比较不同参数效果。"""
         settings = [
             {"temperature": 0.2, "top_p": 1.0, "max_tokens": 350},
             {"temperature": 0.5, "top_p": 1.0, "max_tokens": 350},
@@ -113,7 +115,6 @@ class LLMAgent:
         return results
 
     def _build_messages(self, message: str, system_prompt: Optional[str]) -> List[Dict[str, str]]:
-        """构建发送给模型的消息列表。"""
         messages: List[Dict[str, str]] = []
         if system_prompt:
             messages.append({"role": "system", "content": system_prompt})
@@ -129,13 +130,11 @@ class LLMAgent:
         top_p: float = 1.0,
         max_tokens: int = 800,
     ) -> str:
-        """调用 API，带重试。"""
         url = f"{self.base_url}/chat/completions"
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
         }
-
         payload = {
             "model": self.model,
             "messages": messages,
@@ -148,7 +147,10 @@ class LLMAgent:
         last_error: Optional[Exception] = None
         for attempt in range(1, self.max_retries + 1):
             try:
+                start_time = time.perf_counter()
                 response = requests.post(url, headers=headers, json=payload, timeout=self.timeout)
+                elapsed_ms = (time.perf_counter() - start_time) * 1000
+
                 if self._should_retry_status(response.status_code):
                     raise requests.exceptions.HTTPError(
                         f"status={response.status_code}",
@@ -157,12 +159,34 @@ class LLMAgent:
 
                 response.raise_for_status()
                 result = response.json()
+                llm_logger.log_exchange(
+                    provider="dashscope-compatible",
+                    model=self.model,
+                    endpoint=url,
+                    request_payload=payload,
+                    request_headers=headers,
+                    response_payload=result,
+                    status_code=response.status_code,
+                    duration_ms=elapsed_ms,
+                    extra={"agent_name": self.name, "attempt": attempt},
+                )
                 return result["choices"][0]["message"]["content"]
-
-            except requests.exceptions.RequestException as e:
-                last_error = e
-                status_code = getattr(getattr(e, "response", None), "status_code", None)
-                retryable = self._is_retryable_exception(e, status_code)
+            except requests.exceptions.RequestException as exc:
+                last_error = exc
+                response = getattr(exc, "response", None)
+                status_code = getattr(response, "status_code", None)
+                retryable = self._is_retryable_exception(exc, status_code)
+                llm_logger.log_exchange(
+                    provider="dashscope-compatible",
+                    model=self.model,
+                    endpoint=url,
+                    request_payload=payload,
+                    request_headers=headers,
+                    response_payload=self._safe_json(response) if response is not None else None,
+                    status_code=status_code,
+                    error=str(exc),
+                    extra={"agent_name": self.name, "attempt": attempt, "retryable": retryable},
+                )
 
                 if (not retryable) or (attempt >= self.max_retries):
                     break
@@ -170,56 +194,65 @@ class LLMAgent:
                 delay = self._compute_retry_delay(attempt)
                 print(
                     f"[{self.name}] 第 {attempt} 次失败，{delay:.2f}s 后重试 "
-                    f"(status={status_code}, error={type(e).__name__})"
+                    f"(status={status_code}, error={type(exc).__name__})"
                 )
                 time.sleep(delay)
+            except (KeyError, IndexError, ValueError) as exc:
+                llm_logger.log_exchange(
+                    provider="dashscope-compatible",
+                    model=self.model,
+                    endpoint=url,
+                    request_payload=payload,
+                    request_headers=headers,
+                    error=f"response_parse_error: {exc}",
+                    extra={"agent_name": self.name, "attempt": attempt},
+                )
+                raise Exception(f"解析响应失败: {exc}") from exc
 
-            except (KeyError, IndexError, ValueError) as e:
-                raise Exception(f"解析响应失败: {e}")
-
-        raise Exception(f"API 调用失败(重试后): {last_error}")
+        raise Exception(f"API 调用失败(重试后): {last_error}") from last_error
 
     def _is_retryable_exception(
         self,
         error: requests.exceptions.RequestException,
         status_code: Optional[int],
     ) -> bool:
-        """判断异常是否可重试。"""
-        if isinstance(
-            error,
-            (
-                requests.exceptions.Timeout,
-                requests.exceptions.ConnectionError,
-            ),
-        ):
+        if isinstance(error, (requests.exceptions.Timeout, requests.exceptions.ConnectionError)):
             return True
-
         if status_code is None:
             return False
-
         return self._should_retry_status(status_code)
 
     @staticmethod
     def _should_retry_status(status_code: int) -> bool:
-        """429 和 5xx 可重试。"""
         return status_code == 429 or 500 <= status_code < 600
 
     @staticmethod
-    def _compute_retry_delay(attempt: int, base: float = 1.0, jitter: float = 0.3, max_delay: float = 12.0) -> float:
-        """指数退避 + jitter。"""
+    def _compute_retry_delay(
+        attempt: int,
+        base: float = 1.0,
+        jitter: float = 0.3,
+        max_delay: float = 12.0,
+    ) -> float:
         delay = min(max_delay, base * (2 ** (attempt - 1)))
         return delay + delay * jitter * random.random()
 
+    @staticmethod
+    def _safe_json(response: Optional[requests.Response]) -> Any:
+        if response is None:
+            return None
+        try:
+            return response.json()
+        except ValueError:
+            return {"raw_text": response.text}
+
     def _compress_history_if_needed(self, system_prompt: Optional[str]) -> None:
-        """历史超过阈值时，压缩早期消息。"""
         if len(self.messages) <= self.max_history_messages:
             return
 
         keep_count = max(4, self.max_history_messages // 2)
         old_part = self.messages[:-keep_count]
         recent_part = self.messages[-keep_count:]
-
-        plain_text = "\n".join([f"{m['role']}: {m['content']}" for m in old_part])
+        plain_text = "\n".join(f"{item['role']}: {item['content']}" for item in old_part)
         summary_prompt = (
             "请把以下历史对话压缩为不超过 6 条要点，保留用户偏好、约束条件、已确定结论：\n\n"
             + plain_text
@@ -228,37 +261,23 @@ class LLMAgent:
         try:
             summary = self._call_api(
                 messages=[
-                    {
-                        "role": "system",
-                        "content": "你是对话记录压缩器。",
-                    },
-                    {
-                        "role": "user",
-                        "content": summary_prompt,
-                    },
+                    {"role": "system", "content": "你是对话记录压缩器。"},
+                    {"role": "user", "content": summary_prompt},
                 ],
                 temperature=0.2,
                 top_p=1.0,
                 max_tokens=300,
             )
         except Exception:
-            # 摘要失败时不阻塞主流程，直接截断
             self.messages = recent_part
             return
-
-        memory_msg = {
-            "role": "assistant",
-            "content": "[历史摘要]\n" + summary,
-        }
 
         rebuilt: List[Dict[str, str]] = []
         if system_prompt:
             rebuilt.append({"role": "system", "content": system_prompt})
-        rebuilt.append(memory_msg)
+        rebuilt.append({"role": "assistant", "content": "[历史摘要]\n" + summary})
         rebuilt.extend(recent_part)
-
-        # self.messages 只保存 user/assistant，避免 system 重复，过滤掉可能插入的 system
-        self.messages = [m for m in rebuilt if m["role"] in ["user", "assistant"]]
+        self.messages = [item for item in rebuilt if item["role"] in ["user", "assistant"]]
 
     def clear_history(self) -> None:
         self.messages = []
@@ -266,7 +285,12 @@ class LLMAgent:
     def get_history(self) -> List[Dict[str, str]]:
         return self.messages.copy()
 
-    def set_sampling_params(self, temperature: Optional[float] = None, top_p: Optional[float] = None, max_tokens: Optional[int] = None) -> None:
+    def set_sampling_params(
+        self,
+        temperature: Optional[float] = None,
+        top_p: Optional[float] = None,
+        max_tokens: Optional[int] = None,
+    ) -> None:
         if temperature is not None:
             self.temperature = temperature
         if top_p is not None:

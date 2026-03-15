@@ -1,24 +1,34 @@
 #!/usr/bin/env python3
 """
 LLM Agent 模块
-负责与 LLM API 通信
+负责与 LLM API 通信，并统一记录请求/响应日志。
 """
 
+from __future__ import annotations
+
 import os
-from typing import Optional, List, Dict, Any
+import sys
+import time
+from pathlib import Path
+from typing import Any, Dict, List, Optional
+
 import requests
 from dotenv import load_dotenv
 
-# Load environment variables from .env if present
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from utils.llm_markdown_logger import get_default_llm_logger
+
 load_dotenv()
+
+llm_logger = get_default_llm_logger()
 
 
 class LLMAgent:
-    """
-    LLM Agent 类
-    负责调用大语言模型 API，维护对话历史
-    """
-    
+    """负责调用 LLM API，并维护简单的对话历史。"""
+
     def __init__(
         self,
         name: str = "默认助手",
@@ -26,121 +36,113 @@ class LLMAgent:
         base_url: str = "https://coding.dashscope.aliyuncs.com/v1",
         model: str = "qwen3.5-plus",
         temperature: float = 1.9,
-        max_tokens: int = 1000
+        max_tokens: int = 1000,
     ):
-        """
-        初始化 LLM Agent
-        
-        Args:
-            name: Agent 的名称，用于显示
-            api_key: API 密钥，默认从环境变量 OPENAI_API_KEY 读取
-            base_url: API 基础 URL
-            model: 模型名称
-            temperature: 温度参数 (0-2)
-            max_tokens: 最大生成 token 数
-        """
         self.name = name
         self.api_key = api_key or os.getenv("OPENAI_API_KEY")
         if not self.api_key:
             raise ValueError(f"[{name}] 请提供 api_key 或设置 OPENAI_API_KEY 环境变量")
-        
+
         self.base_url = base_url.rstrip("/")
         self.model = model
         self.temperature = temperature
         self.max_tokens = max_tokens
-        
-        # 对话历史
         self.messages: List[Dict[str, str]] = []
-    
+
     def chat(
         self,
         message: str,
         system_prompt: Optional[str] = None,
-        stream: bool = False
+        stream: bool = False,
     ) -> str:
-        """
-        发送对话消息
-        
-        Args:
-            message: 用户消息
-            system_prompt: 系统提示词
-            stream: 是否流式输出
-            
-        Returns:
-            AI 的回复内容
-        """
-        # 构建消息列表
-        messages = []
-        
-        # 添加系统提示
+        messages: List[Dict[str, str]] = []
         if system_prompt:
             messages.append({"role": "system", "content": system_prompt})
-        
-        # 添加历史对话
         messages.extend(self.messages)
-        
-        # 添加当前用户消息
         messages.append({"role": "user", "content": message})
-        
-        # 调用 API
+
         response = self._call_api(messages, stream)
-        
-        # 保存对话历史
         self.messages.append({"role": "user", "content": message})
         self.messages.append({"role": "assistant", "content": response})
-        
         return response
-    
+
     def _call_api(
         self,
         messages: List[Dict[str, str]],
-        stream: bool = False
+        stream: bool = False,
     ) -> str:
-        """
-        调用 LLM API
-        
-        Args:
-            messages: 消息列表
-            stream: 是否流式输出
-            
-        Returns:
-            AI 回复内容
-        """
         url = f"{self.base_url}/chat/completions"
-        
         headers = {
             "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json"
+            "Content-Type": "application/json",
         }
-        
-        data = {
+        payload = {
             "model": self.model,
             "messages": messages,
             "temperature": self.temperature,
             "max_tokens": self.max_tokens,
-            "stream": stream
+            "stream": stream,
         }
-        
+
         try:
-            response = requests.post(url, headers=headers, json=data, timeout=60)
+            start_time = time.perf_counter()
+            response = requests.post(url, headers=headers, json=payload, timeout=60)
+            elapsed_ms = (time.perf_counter() - start_time) * 1000
             response.raise_for_status()
-            
+
             result = response.json()
+            llm_logger.log_exchange(
+                provider="dashscope-compatible",
+                model=self.model,
+                endpoint=url,
+                request_payload=payload,
+                request_headers=headers,
+                response_payload=result,
+                status_code=response.status_code,
+                duration_ms=elapsed_ms,
+                extra={"agent_name": self.name},
+            )
             return result["choices"][0]["message"]["content"]
-            
-        except requests.exceptions.RequestException as e:
-            raise Exception(f"API 调用失败: {e}")
-        except (KeyError, IndexError) as e:
-            raise Exception(f"解析响应失败: {e}")
-    
-    def clear_history(self):
-        """清空对话历史"""
+        except requests.exceptions.RequestException as exc:
+            response = getattr(exc, "response", None)
+            llm_logger.log_exchange(
+                provider="dashscope-compatible",
+                model=self.model,
+                endpoint=url,
+                request_payload=payload,
+                request_headers=headers,
+                response_payload=self._safe_json(response) if response is not None else None,
+                status_code=response.status_code if response is not None else None,
+                error=str(exc),
+                extra={"agent_name": self.name},
+            )
+            raise Exception(f"API 调用失败: {exc}") from exc
+        except (KeyError, IndexError, ValueError) as exc:
+            llm_logger.log_exchange(
+                provider="dashscope-compatible",
+                model=self.model,
+                endpoint=url,
+                request_payload=payload,
+                request_headers=headers,
+                error=f"response_parse_error: {exc}",
+                extra={"agent_name": self.name},
+            )
+            raise Exception(f"解析响应失败: {exc}") from exc
+
+    @staticmethod
+    def _safe_json(response: Optional[requests.Response]) -> Any:
+        if response is None:
+            return None
+        try:
+            return response.json()
+        except ValueError:
+            return {"raw_text": response.text}
+
+    def clear_history(self) -> None:
         self.messages = []
-    
+
     def get_history(self) -> List[Dict[str, str]]:
-        """获取对话历史"""
         return self.messages.copy()
-    
+
     def get_info(self) -> str:
-        """获取 Agent 信息"""
         return f"[{self.name}] 模型: {self.model}"

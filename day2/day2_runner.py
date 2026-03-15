@@ -1,10 +1,7 @@
 #!/usr/bin/env python3
 """
 Day 2 Runner
-参照 Day 1 的交互风格，新增：
-- 参数实验
-- top_p / max_tokens / retries 设置
-- 多轮对话上下文查看
+参考 Day 1 的交互风格，增加参数实验和上下文管理能力。
 """
 
 from typing import Optional
@@ -20,19 +17,22 @@ class Day2Runner:
     def create_agent(self) -> bool:
         try:
             self.agent = LLMAgent(name="Day2学习助手")
-            print(f"✅ Agent 已创建: {self.agent.get_info()}")
+            print(f"[OK] Agent 已创建: {self.agent.get_info()}")
             return True
         except ValueError as e:
-            print(f"❌ 创建失败: {e}")
+            print(f"[ERROR] 创建失败: {e}")
             return False
 
     def run_experiment(self, prompt: str) -> None:
         if not self.agent:
-            print("❌ 请先创建 Agent")
+            print("[ERROR] 请先创建 Agent")
             return
 
-        print("\n🧪 参数实验开始...\n")
-        results = self.agent.run_parameter_experiment(prompt=prompt, system_prompt=self.system_prompt)
+        print("\n[INFO] 参数实验开始...\n")
+        results = self.agent.run_parameter_experiment(
+            prompt=prompt,
+            system_prompt=self.system_prompt,
+        )
         for item in results:
             print(
                 f"Case {item['case']} | temperature={item['temperature']} | "
@@ -43,15 +43,15 @@ class Day2Runner:
 
     def chat(self, message: str) -> None:
         if not self.agent:
-            print("❌ 请先创建 Agent")
+            print("[ERROR] 请先创建 Agent")
             return
 
         try:
-            print("\n🤖 思考中...")
+            print("\n[INFO] 思考中...")
             ans = self.agent.chat(message=message, system_prompt=self.system_prompt)
             print(f"AI: {ans}\n")
         except Exception as e:
-            print(f"❌ 对话失败: {e}")
+            print(f"[ERROR] 对话失败: {e}")
 
     def run(self) -> None:
         print("=" * 60)
@@ -80,7 +80,7 @@ class Day2Runner:
                     continue
 
                 if user_input.lower() in ["quit", "exit"]:
-                    print("\n👋 再见")
+                    print("\n再见")
                     break
 
                 if user_input.lower().startswith("chat "):
@@ -117,25 +117,24 @@ class Day2Runner:
 
                 if user_input.lower() == "clear" and self.agent:
                     self.agent.clear_history()
-                    print("🗑️ 历史已清空")
+                    print("历史已清空")
                     continue
 
                 if user_input.lower().startswith("prompt "):
                     self.system_prompt = user_input[7:].strip()
-                    print("📝 system prompt 已更新")
+                    print("system prompt 已更新")
                     continue
 
                 if user_input.lower() == "info" and self.agent:
                     print(self.agent.get_info())
                     continue
 
-                print("❓ 未知命令，请使用 chat/experiment/temp/top_p/max_tokens/retries/history/clear/prompt/info")
-
+                print("[ERROR] 未知命令，请使用 chat/experiment/temp/top_p/max_tokens/retries/history/clear/prompt/info")
             except KeyboardInterrupt:
-                print("\n\n👋 再见")
+                print("\n\n再见")
                 break
             except Exception as e:
-                print(f"❌ 错误: {e}")
+                print(f"[ERROR] 错误: {e}")
 
 
 def main() -> None:

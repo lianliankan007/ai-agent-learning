@@ -9,15 +9,18 @@ import random
 import sys
 import time
 from dataclasses import dataclass
-from typing import Any
+from pathlib import Path
 
 from openai import OpenAI
-from openai import (
-    APIConnectionError,
-    APIStatusError,
-    APITimeoutError,
-    RateLimitError,
-)
+from openai import APIConnectionError, APIStatusError, APITimeoutError, RateLimitError
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from utils.llm_markdown_logger import get_default_llm_logger
+
+llm_logger = get_default_llm_logger()
 
 
 @dataclass
@@ -56,6 +59,13 @@ class LLMClient:
 
         for attempt in range(1, self.retry.max_retries + 1):
             start = time.perf_counter()
+            request_payload = {
+                "model": self.model,
+                "input": messages,
+                "temperature": temperature,
+                "top_p": top_p,
+                "max_output_tokens": max_tokens,
+            }
             try:
                 resp = self.client.responses.create(
                     model=self.model,
@@ -66,6 +76,15 @@ class LLMClient:
                 )
                 elapsed = (time.perf_counter() - start) * 1000
                 logging.info("request_ok attempt=%s elapsed_ms=%.1f", attempt, elapsed)
+                llm_logger.log_exchange(
+                    provider="openai-sdk",
+                    model=self.model,
+                    endpoint="OpenAI.responses.create",
+                    request_payload=request_payload,
+                    response_payload=resp.model_dump(),
+                    duration_ms=elapsed,
+                    extra={"attempt": attempt},
+                )
                 return resp.output_text.strip()
             except (APIConnectionError, APITimeoutError, RateLimitError) as err:
                 last_error = err
@@ -77,10 +96,28 @@ class LLMClient:
                 status_code = err.status_code
                 retryable = self._is_retryable_status(status_code)
                 err_name = err.__class__.__name__
-            except Exception as err:  # unknown error, fail fast
+            except Exception as err:
+                llm_logger.log_exchange(
+                    provider="openai-sdk",
+                    model=self.model,
+                    endpoint="OpenAI.responses.create",
+                    request_payload=request_payload,
+                    error=f"Unexpected error: {err}",
+                    extra={"attempt": attempt},
+                )
                 raise RuntimeError(f"Unexpected error: {err}") from err
 
             elapsed = (time.perf_counter() - start) * 1000
+            llm_logger.log_exchange(
+                provider="openai-sdk",
+                model=self.model,
+                endpoint="OpenAI.responses.create",
+                request_payload=request_payload,
+                status_code=status_code,
+                duration_ms=elapsed,
+                error=f"{err_name}: {last_error}",
+                extra={"attempt": attempt, "retryable": retryable},
+            )
             logging.warning(
                 "request_fail attempt=%s retryable=%s status=%s error=%s elapsed_ms=%.1f",
                 attempt,
@@ -108,19 +145,17 @@ def maybe_summarize_history(
     if len(history) <= max_messages:
         return history
 
-    # Keep system + latest turns; summarize older turns into one memory block.
-    system_msgs = [m for m in history if m["role"] == "system"]
-    non_system = [m for m in history if m["role"] != "system"]
+    system_msgs = [item for item in history if item["role"] == "system"]
+    non_system = [item for item in history if item["role"] != "system"]
     recent = non_system[-(max_messages - 2) :]
     old = non_system[: -(max_messages - 2)]
-
     if not old:
         return history
 
     summary_prompt = [
         {
             "role": "system",
-            "content": "你是对话记录整理器。请把历史对话压缩为 6 条以内要点，保留用户偏好、约束、已确认结论。",
+            "content": "你是对话记录整理器。请把历史对话压缩为 6 条以内要点，保留用户偏好、约束和已确认结论。",
         },
         {
             "role": "user",
@@ -139,7 +174,7 @@ def maybe_summarize_history(
 
     memory = {
         "role": "system",
-        "content": "历史摘要记忆（由系统生成）:\n" + summary,
+        "content": "历史摘要记忆（由系统生成）\n" + summary,
     }
     return system_msgs + [memory] + recent
 
@@ -155,10 +190,7 @@ def run_experiment(llm: LLMClient, prompt: str, max_tokens: int) -> None:
     print("\n=== 参数实验结果 ===")
     for idx, (temp, top_p, out_max) in enumerate(settings, start=1):
         messages = [
-            {
-                "role": "system",
-                "content": "你是一个简洁的学习助教。",
-            },
+            {"role": "system", "content": "你是一个简洁的学习助教。"},
             {"role": "user", "content": prompt},
         ]
         answer = llm.chat_completion(
@@ -218,16 +250,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--verbose", action="store_true")
 
     sub = parser.add_subparsers(dest="cmd", required=True)
-
     exp = sub.add_parser("experiment", help="Run parameter experiments")
     exp.add_argument(
         "--prompt",
         default="请分别用 3 个层次解释什么是反向传播：小白版、工程师版、数学版。",
         help="Prompt to test under different parameters",
     )
-
     sub.add_parser("chat", help="Run multi-turn chat")
-
     return parser
 
 
@@ -238,6 +267,7 @@ def main() -> int:
     logging.basicConfig(
         level=logging.INFO if args.verbose else logging.WARNING,
         format="%(asctime)s %(levelname)s %(message)s",
+        stream=sys.stdout,
     )
 
     retry = RetryConfig(
