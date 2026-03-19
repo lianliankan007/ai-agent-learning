@@ -26,6 +26,7 @@ import re
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
 import httpx
@@ -40,6 +41,38 @@ from qdrant_client.models import (
     PointStruct,
     VectorParams,
 )
+
+BASE_DIR = Path(__file__).resolve().parent
+PROJECT_ROOT_DIR = BASE_DIR.parent
+LOCAL_CONFIG_DIR = PROJECT_ROOT_DIR / ".local"
+DEFAULT_OPENAI_API_KEY_FILE = LOCAL_CONFIG_DIR / "openai_api_key.txt"
+
+
+def _read_secret_file(path: Path) -> Optional[str]:
+    if not path.is_file():
+        return None
+    value = path.read_text(encoding="utf-8-sig").strip()
+    return value or None
+
+
+def resolve_openai_api_key(explicit_api_key: Optional[str] = None) -> Optional[str]:
+    if explicit_api_key and explicit_api_key.strip():
+        return explicit_api_key.strip()
+
+    env_api_key = os.getenv("OPENAI_API_KEY", "").strip()
+    if env_api_key:
+        return env_api_key
+
+    custom_file = os.getenv("OPENAI_API_KEY_FILE", "").strip()
+    candidate_files = [Path(custom_file).expanduser()] if custom_file else []
+    candidate_files.append(DEFAULT_OPENAI_API_KEY_FILE)
+
+    for path in candidate_files:
+        api_key = _read_secret_file(path)
+        if api_key:
+            return api_key
+
+    return None
 
 
 @dataclass
@@ -235,9 +268,12 @@ class MemoryAwareAgent:
         self.embedder = embedder
         self.memory_store = memory_store
         self.user_id = user_id
-        self.api_key = api_key or os.getenv("OPENAI_API_KEY")
+        self.api_key = resolve_openai_api_key(api_key)
         if not self.api_key:
-            raise ValueError("请提供 api_key 或设置 OPENAI_API_KEY 环境变量")
+            raise ValueError(
+                "请提供 api_key、设置 OPENAI_API_KEY 环境变量，"
+                f"或在 {DEFAULT_OPENAI_API_KEY_FILE} 写入 API Key"
+            )
 
         self.base_url = base_url.rstrip("/")
         self.model = model
@@ -559,3 +595,5 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+
