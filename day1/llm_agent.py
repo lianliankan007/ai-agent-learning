@@ -7,6 +7,10 @@ LLM Agent 模块
 import os
 from typing import Optional, List, Dict, Any
 import requests
+from dotenv import load_dotenv
+
+# Load environment variables from .env if present
+load_dotenv()
 
 
 class LLMAgent:

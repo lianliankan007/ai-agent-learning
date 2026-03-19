@@ -12,6 +12,10 @@ from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional
 
 import requests
+from dotenv import load_dotenv
+
+# Load environment variables from .env if present
+load_dotenv()
 
 
 class FunctionCallingAgent:
