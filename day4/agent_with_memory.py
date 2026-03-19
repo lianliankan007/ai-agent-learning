@@ -1,11 +1,11 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 """
 day4: 支持长期记忆的 Agent 示例
 
 默认组合:
 - LLM: DashScope OpenAI 兼容接口
 - Embedding: Ollama 本地 embedding 模型
-- Vector DB: 本地 Qdrant
+- Vector DB: 本地 Qdrant（默认无鉴权）
 
 运行前可设置的环境变量:
   OPENAI_API_KEY
@@ -15,7 +15,6 @@ day4: 支持长期记忆的 Agent 示例
   OLLAMA_EMBED_MODEL=nomic-embed-text
   QDRANT_HOST=localhost
   QDRANT_PORT=6333
-  QDRANT_API_KEY=
   MEMORY_COLLECTION=day4_agent_memory
 """
 
@@ -32,43 +31,66 @@ import httpx
 import requests
 from qdrant_client import QdrantClient
 from qdrant_client.models import Distance, PointStruct, VectorParams
+
 from vector_retriever import MemorySearchResult, QdrantMemoryRetriever
 
+# `BASE_DIR` 指向当前脚本所在目录，也就是 day4 目录。
 BASE_DIR = Path(__file__).resolve().parent
+# `PROJECT_ROOT_DIR` 指向仓库根目录，方便统一查找配置文件。
 PROJECT_ROOT_DIR = BASE_DIR.parent
+# 本地敏感配置约定放在 `.local` 目录下，不提交到 Git。
 LOCAL_CONFIG_DIR = PROJECT_ROOT_DIR / ".local"
+# 默认从这个文件读取 OpenAI API Key。
 DEFAULT_OPENAI_API_KEY_FILE = LOCAL_CONFIG_DIR / "openai_api_key.txt"
 
 
 def _read_secret_file(path: Path) -> Optional[str]:
+    """读取密钥文件并返回去掉空白后的内容。"""
+    # 如果文件不存在，直接返回 None，让上层继续尝试其他来源。
     if not path.is_file():
         return None
+    # 使用 `utf-8-sig` 可以兼容带 BOM 的文本文件。
     value = path.read_text(encoding="utf-8-sig").strip()
+    # 空字符串对上层没有意义，因此统一转成 None。
     return value or None
 
 
 def resolve_openai_api_key(explicit_api_key: Optional[str] = None) -> Optional[str]:
+    """按优先级解析 API Key。
+
+    优先级从高到低是：
+    1. 显式传入的 `api_key`
+    2. 环境变量 `OPENAI_API_KEY`
+    3. 自定义文件 `OPENAI_API_KEY_FILE`
+    4. 默认文件 `.local/openai_api_key.txt`
+    """
+    # 如果调用方已经显式传参，就优先使用它。
     if explicit_api_key and explicit_api_key.strip():
         return explicit_api_key.strip()
 
+    # 第二优先级是环境变量，适合 CI 或本地 shell 配置。
     env_api_key = os.getenv("OPENAI_API_KEY", "").strip()
     if env_api_key:
         return env_api_key
 
+    # 允许通过环境变量指定一个自定义密钥文件路径。
     custom_file = os.getenv("OPENAI_API_KEY_FILE", "").strip()
     candidate_files = [Path(custom_file).expanduser()] if custom_file else []
+    # 无论是否传了自定义路径，最后都回退到仓库约定的默认文件。
     candidate_files.append(DEFAULT_OPENAI_API_KEY_FILE)
 
+    # 依次尝试候选文件，找到第一个可用的值就返回。
     for path in candidate_files:
         api_key = _read_secret_file(path)
         if api_key:
             return api_key
 
+    # 所有来源都没有拿到时，返回 None 给上层抛错。
     return None
 
 
 class OllamaEmbedder:
-    """复用 rag-opt 的本地 Ollama embedding 思路。"""
+    """负责把文本转换成向量。"""
 
     def __init__(self, base_url: str, model: str, timeout: int = 120):
         self.base_url = base_url.rstrip("/")
@@ -76,7 +98,10 @@ class OllamaEmbedder:
         self.timeout = timeout
 
     def embed_single(self, text: str) -> List[float]:
+        """调用 Ollama 的 `/api/embed` 接口生成单条文本的向量。"""
+        # 这里使用短生命周期的客户端，代码更直观，也方便控制超时。
         with httpx.Client(timeout=self.timeout) as client:
+            # Ollama 支持批量输入，这里虽然只传一条，也统一走 list 结构。
             resp = client.post(
                 f"{self.base_url}/api/embed",
                 json={"model": self.model, "input": [text]},
@@ -84,39 +109,44 @@ class OllamaEmbedder:
             resp.raise_for_status()
             data = resp.json()
             embeddings = data["embeddings"]
+            # 正常情况下应至少返回一个向量；没有时说明服务异常。
             if not embeddings:
                 raise RuntimeError("Ollama 没有返回 embedding")
+            # 因为只传入了一条文本，所以直接拿第 0 个向量。
             return embeddings[0]
 
 
 class QdrantMemoryStore:
-    """基于 Qdrant 的长期记忆存储。"""
+    """负责长期记忆的存储层。
+
+    这个类只处理“写入记忆”和“准备检索器”，真正的检索算法被拆到了
+    `vector_retriever.py`，这样职责更清晰。
+    """
 
     def __init__(
         self,
         host: str,
         port: int,
         collection_name: str,
-        api_key: str = "",
     ):
         self.host = host
         self.port = port
         self.collection_name = collection_name
-        self.api_key = api_key
+        # 下面两个对象都采用懒加载，避免构造时就立刻连接外部服务。
         self._client: Optional[QdrantClient] = None
         self._retriever: Optional[QdrantMemoryRetriever] = None
 
     @property
     def client(self) -> QdrantClient:
+        """首次访问时创建 QdrantClient，之后复用同一个实例。"""
         if self._client is None:
-            kwargs: Dict[str, Any] = {"host": self.host, "port": self.port, "timeout": 30}
-            if self.api_key:
-                kwargs["api_key"] = self.api_key
-            self._client = QdrantClient(**kwargs)
+            # 这个示例默认连接本地 Qdrant，因此只保留 host/port 即可。
+            self._client = QdrantClient(host=self.host, port=self.port, timeout=30)
         return self._client
 
     @property
     def retriever(self) -> QdrantMemoryRetriever:
+        """首次访问时构造检索器，并把当前 collection 信息传进去。"""
         if self._retriever is None:
             self._retriever = QdrantMemoryRetriever(
                 client=self.client,
@@ -125,18 +155,24 @@ class QdrantMemoryStore:
         return self._retriever
 
     def ensure_collection(self, vector_size: int) -> None:
+        """确保目标 collection 已存在，不存在时自动创建。"""
         collections = self.client.get_collections()
         names = [item.name for item in collections.collections]
         if self.collection_name in names:
             return
+        # 这里指定余弦距离，表示检索时按向量方向相似度比较。
         self.client.create_collection(
             collection_name=self.collection_name,
             vectors_config=VectorParams(size=vector_size, distance=Distance.COSINE),
         )
 
     def add_memory(self, content: str, vector: List[float], metadata: Dict[str, Any]) -> str:
+        """把一条长期记忆写入 Qdrant。"""
+        # 写入前先保证 collection 存在，而且向量维度匹配。
         self.ensure_collection(len(vector))
+        # 如果调用方没有指定 id，就自动生成一个 UUID。
         memory_id = metadata.get("id") or str(uuid.uuid4())
+        # 记忆正文放在 `content` 字段里，其他信息都作为 payload 元数据保存。
         payload = {"content": content, **metadata}
         self.client.upsert(
             collection_name=self.collection_name,
@@ -161,6 +197,7 @@ class MemoryAwareAgent:
     ):
         self.embedder = embedder
         self.memory_store = memory_store
+        # `user_id` 用来做多用户隔离，不同用户可以共享同一个 Qdrant collection。
         self.user_id = user_id
         self.api_key = resolve_openai_api_key(api_key)
         if not self.api_key:
@@ -173,8 +210,10 @@ class MemoryAwareAgent:
         self.model = model
         self.temperature = temperature
         self.max_tokens = max_tokens
+        # `messages` 保存短期对话历史，只在当前进程内生效，重启后会丢失。
         self.messages: List[Dict[str, str]] = []
         self.system_prompt = "你是一个具备长期记忆能力的学习助手，回答时优先利用历史记忆并保持结构清晰。"
+        # 默认用 hybrid 检索，因为它兼顾语义相似度、关键词和重要度。
         self.retrieval_mode = "hybrid"
 
     def remember(
@@ -185,7 +224,9 @@ class MemoryAwareAgent:
         tags: Optional[List[str]] = None,
         importance: float = 0.6,
     ) -> str:
+        """把一段内容转成向量并写入长期记忆库。"""
         vector = self.embedder.embed_single(content)
+        # 这些元数据会跟正文一起存到 Qdrant，后续检索和过滤都要用到。
         metadata = {
             "user_id": self.user_id,
             "memory_type": memory_type,
@@ -204,22 +245,28 @@ class MemoryAwareAgent:
         memory_type: Optional[str] = None,
         topic: Optional[str] = None,
     ) -> List[MemorySearchResult]:
+        """根据查询语句召回长期记忆。"""
         mode = retrieval_mode or self.retrieval_mode
+        # 无论用哪种模式，第一步都需要先把查询语句转成向量。
         vector = self.embedder.embed_single(query)
+        # 默认按当前用户过滤，避免不同用户的记忆混在一起。
         filters = {"user_id": self.user_id}
         if memory_type:
             filters["memory_type"] = memory_type
         if topic:
             filters["topic"] = topic
 
+        # simple: 只看向量相似度，不加过滤。
         if mode == "simple":
             return self.memory_store.retriever.semantic_search(vector, top_k=top_k)
+        # filtered: 向量检索 + 元数据过滤。
         if mode == "filtered":
             return self.memory_store.retriever.semantic_search(
                 vector,
                 top_k=top_k,
                 filters=filters,
             )
+        # hybrid: 过滤后先扩大召回，再综合多个信号重排。
         if mode == "hybrid":
             return self.memory_store.retriever.hybrid_search(
                 query,
@@ -230,21 +277,27 @@ class MemoryAwareAgent:
         raise ValueError(f"不支持的检索模式: {mode}")
 
     def chat(self, user_message: str) -> str:
+        """完成一次完整聊天：检索记忆、调用模型、更新上下文、尝试记忆抽取。"""
+        # 先从长期记忆里召回与当前问题相关的内容。
         memories = self.retrieve_memories(user_message, top_k=4, retrieval_mode=self.retrieval_mode)
         memory_context = self._build_memory_context(memories)
+        # 把检索结果拼进 system prompt，让模型优先参考历史事实。
         composed_system_prompt = (
             f"{self.system_prompt}\n\n"
             "以下是检索到的长期记忆，请优先参考，但不要编造不存在的历史。\n"
             f"{memory_context}"
         )
 
+        # 真正发起聊天请求时，会同时带上短期对话历史。
         response = self._call_api(
             messages=self._compose_messages(user_message, composed_system_prompt),
         )
 
+        # 把本轮问答加入短期记忆，供后续连续对话使用。
         self.messages.append({"role": "user", "content": user_message})
         self.messages.append({"role": "assistant", "content": response})
 
+        # 最后尝试从用户输入中抽取“值得长期保存”的信息。
         extracted = self._extract_memory(user_message)
         if extracted is not None:
             self.remember(**extracted)
@@ -252,15 +305,19 @@ class MemoryAwareAgent:
         return response
 
     def clear_history(self) -> None:
+        """只清空短期对话历史，不删除 Qdrant 里的长期记忆。"""
         self.messages = []
 
     def _compose_messages(self, user_message: str, system_prompt: str) -> List[Dict[str, str]]:
+        """按 Chat Completions 接口要求拼装消息列表。"""
+        # 顺序很重要：system 在最前面，然后是历史对话，最后是当前问题。
         messages: List[Dict[str, str]] = [{"role": "system", "content": system_prompt}]
         messages.extend(self.messages)
         messages.append({"role": "user", "content": user_message})
         return messages
 
     def _call_api(self, messages: List[Dict[str, str]]) -> str:
+        """调用 DashScope OpenAI 兼容接口获取模型回答。"""
         response = requests.post(
             f"{self.base_url}/chat/completions",
             headers={
@@ -277,10 +334,12 @@ class MemoryAwareAgent:
         )
         response.raise_for_status()
         data = response.json()
+        # OpenAI 兼容接口通常把主回答放在 `choices[0].message.content`。
         return data["choices"][0]["message"]["content"]
 
     @staticmethod
     def _build_memory_context(memories: Iterable[MemorySearchResult]) -> str:
+        """把检索结果整理成适合拼进提示词的纯文本。"""
         rows = list(memories)
         if not rows:
             return "暂无长期记忆。"
@@ -295,10 +354,12 @@ class MemoryAwareAgent:
         return "\n".join(lines)
 
     def _extract_memory(self, user_message: str) -> Optional[Dict[str, Any]]:
+        """用简单规则从用户输入里提取长期记忆。"""
         text = user_message.strip()
         if not text:
             return None
 
+        # 每条规则包含：匹配正则、记忆类型、主题、重要度。
         rules = [
             (r"请记住[:：]?\s*(.+)", "instruction", "explicit_memory", 0.95),
             (r"我叫(.+)", "profile", "identity", 0.85),
@@ -311,6 +372,7 @@ class MemoryAwareAgent:
         for pattern, memory_type, topic, importance in rules:
             match = re.search(pattern, text)
             if match:
+                # 显式要求“请记住”的内容直接原文入库，其他规则统一加一个来源前缀。
                 content = text if memory_type == "instruction" else f"用户说: {text}"
                 return {
                     "content": content,
@@ -323,12 +385,13 @@ class MemoryAwareAgent:
 
 
 class MemoryAgentRunner:
-    """day4 交互式 Runner。"""
+    """day4 的命令行交互壳。"""
 
     def __init__(self, agent: MemoryAwareAgent):
         self.agent = agent
 
     def run(self) -> None:
+        """进入交互循环，不断读取用户输入并分发到不同命令。"""
         print("=" * 72)
         print("🧠 Day4 Agent Memory 演示")
         print("=" * 72)
@@ -351,6 +414,7 @@ class MemoryAgentRunner:
                 if not user_input:
                     continue
 
+                # 命令判断统一转小写，但真实内容仍然保留原始输入。
                 lower_text = user_input.lower()
                 if lower_text in {"quit", "exit"}:
                     print("\n👋 再见!")
@@ -425,6 +489,7 @@ class MemoryAgentRunner:
                     print(f"👤 当前用户切换为: {self.agent.user_id}\n")
                     continue
 
+                # 走到这里说明不是命令，而是普通聊天输入。
                 print("\n🤖 Agent 思考中...")
                 answer = self.agent.chat(user_input)
                 print(f"AI: {answer}\n")
@@ -432,10 +497,12 @@ class MemoryAgentRunner:
                 print("\n\n👋 再见!")
                 break
             except Exception as exc:
+                # 这里统一兜底，避免 CLI 因一次错误直接退出。
                 print(f"\n❌ 错误: {exc}\n")
 
     @staticmethod
     def _print_results(results: List[MemorySearchResult]) -> None:
+        """把检索结果格式化后打印到终端。"""
         if not results:
             print("📭 没有检索到相关记忆\n")
             return
@@ -450,6 +517,7 @@ class MemoryAgentRunner:
 
 
 def build_agent() -> MemoryAwareAgent:
+    """根据环境变量构造一个可运行的 Agent。"""
     embedder = OllamaEmbedder(
         base_url=os.getenv("OLLAMA_BASE_URL", "http://10.66.131.38:11434"),
         model=os.getenv("OLLAMA_EMBED_MODEL", "nomic-embed-text"),
@@ -457,7 +525,6 @@ def build_agent() -> MemoryAwareAgent:
     memory_store = QdrantMemoryStore(
         host=os.getenv("QDRANT_HOST", "localhost"),
         port=int(os.getenv("QDRANT_PORT", "6333")),
-        api_key=os.getenv("QDRANT_API_KEY", ""),
         collection_name=os.getenv("MEMORY_COLLECTION", "day4_agent_memory"),
     )
     return MemoryAwareAgent(
@@ -471,6 +538,7 @@ def build_agent() -> MemoryAwareAgent:
 
 
 def seed_demo_memories(agent: MemoryAwareAgent) -> None:
+    """向记忆库注入几条演示数据，方便本地快速体验。"""
     demo_rows = [
         ("用户喜欢中文回答，并偏好结构化说明", "preference", "style", 0.9),
         ("用户正在学习 Agent Memory、Embedding 和向量检索", "progress", "learning", 0.88),
@@ -487,6 +555,7 @@ def seed_demo_memories(agent: MemoryAwareAgent) -> None:
 
 
 def main() -> None:
+    """程序入口：构造 Agent，可选注入演示数据，然后启动 CLI。"""
     agent = build_agent()
     if os.getenv("DAY4_SEED_DEMO", "false").lower() == "true":
         seed_demo_memories(agent)
