@@ -184,6 +184,7 @@ Phase5：完整Agent项目（3周）
     - 多轮对话：上下文管理
     ```
 ```
+## 和LLM的交互需要调用`llm_markdown_logger.py`打印相关日志
 
 
 
@@ -191,7 +192,7 @@ Phase5：完整Agent项目（3周）
 - 本仓库按循序渐进的练习方式组织。`day1/` 到 `day4/` 分别包含独立的 Python 示例，内容从基础 agent 逐步过渡到带记忆能力的 agent。
 - 新增代码应尽量放在对应的 day 目录下，除非确实有意复用，否则不要建立跨 day 的依赖。
 - 仓库根目录下的重要文件包括 `requirements.txt`、`readme.md`，以及 `memory/` 目录中的笔记文件，例如 `memory/learning-progress.md`。
-- 本地密钥或敏感配置应放在 `.local/` 或环境变量中，不能提交到仓库。
+- 本地密钥或敏感配置应放在项目根目录的 `.env` 或环境变量中，不能提交到仓库。
 
 ## 构建、测试与开发命令
 先使用 `pip install -r requirements.txt` 创建环境并安装依赖。运行某个练习时，可直接执行对应脚本，例如 `python day4/agent_with_memory.py`。如果只想快速检查语法是否正确，可以运行 `python -m py_compile day4/agent_with_memory.py day4/vector_retriever.py`。如果新增了模块，请在对应 day 目录下的 README 或总结文件中补充准确的运行命令。
@@ -201,7 +202,7 @@ Phase5：完整Agent项目（3周）
 
 
 ## 安全与配置建议
-配置应从 `.env`、`.local/openai_api_key.txt` 或环境变量中读取。不要提交真实凭证、生成缓存或 IDE 配置文件。像 `__pycache__/` 这样的临时输出应排除在仓库之外，同时将可复用的默认配置做成可通过环境变量调整的形式。
+配置应优先从项目根目录的 `.env` 中读取。不要提交真实凭证、生成缓存或 IDE 配置文件。像 `__pycache__/` 这样的临时输出应排除在仓库之外，同时将可复用的默认配置做成可通过环境变量调整的形式。
 
 
 

@@ -14,7 +14,6 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import requests
-from dotenv import load_dotenv
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
@@ -22,8 +21,6 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from utils.llm_markdown_logger import get_default_llm_logger
 from utils.openai_config import resolve_openai_api_key
-
-load_dotenv()
 
 llm_logger = get_default_llm_logger()
 
@@ -47,7 +44,7 @@ class LLMAgent:
         self.name = name
         self.api_key = resolve_openai_api_key(api_key)
         if not self.api_key:
-            raise ValueError(f"[{name}] 请提供 api_key 或设置 OPENAI_API_KEY 环境变量")
+            raise ValueError(f"[{name}] 请提供 api_key，或在项目根目录的 .env 中配置 OPENAI_API_KEY")
 
         self.base_url = base_url.rstrip("/")
         self.model = model

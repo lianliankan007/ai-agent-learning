@@ -2,8 +2,8 @@
 """
 day3: 基于 day1 风格的 function calling 示例
 
-运行前请先设置环境变量:
-  set OPENAI_API_KEY=your_api_key
+运行前请先在项目根目录的 `.env` 中配置:
+  OPENAI_API_KEY=your_api_key
 """
 
 from __future__ import annotations
@@ -17,7 +17,6 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 import requests
-from dotenv import load_dotenv
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
@@ -25,8 +24,6 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from utils.llm_markdown_logger import get_default_llm_logger
 from utils.openai_config import resolve_openai_api_key
-
-load_dotenv()
 
 llm_logger = get_default_llm_logger()
 
@@ -44,7 +41,7 @@ class FunctionCallingAgent:
     ):
         self.api_key = resolve_openai_api_key(api_key)
         if not self.api_key:
-            raise ValueError("请提供 api_key 或设置 OPENAI_API_KEY 环境变量")
+            raise ValueError("请提供 api_key，或在项目根目录的 .env 中配置 OPENAI_API_KEY")
 
         self.base_url = base_url.rstrip("/")
         self.model = model

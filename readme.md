@@ -110,9 +110,7 @@ pip install httpx qdrant-client
 请不要把 API Key 直接写进代码里。
 
 推荐方式：
-- 放到 `.env`
-- 或放到 `.local/openai_api_key.txt`
-- 或通过环境变量设置 `OPENAI_API_KEY`
+- 放到项目根目录的 `.env`
 
 示例 `.env`：
 
@@ -237,7 +235,6 @@ MEMORY_USER_ID=default-user
 请特别注意：
 - 不要提交真实 API Key
 - 不要提交 `.env` 中的真实敏感信息
-- 不要提交 `.local/` 下的密钥文件
 - `__pycache__/` 等临时文件应忽略
 
 ## 适合谁

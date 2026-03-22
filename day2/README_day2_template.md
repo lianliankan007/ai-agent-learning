@@ -13,8 +13,10 @@ pip install -U requests
 
 ## 配置密钥
 
-```bash
-export OPENAI_API_KEY="你的key"
+在项目根目录创建 `.env`：
+
+```env
+OPENAI_API_KEY=你的key
 ```
 
 ## 运行

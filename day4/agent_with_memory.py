@@ -22,17 +22,22 @@ from __future__ import annotations
 
 import os
 import re
+import sys
 import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 import httpx
 import requests
 from qdrant_client import QdrantClient
 from qdrant_client.models import Distance, PointStruct, VectorParams
 
-from utils.openai_config import DEFAULT_OPENAI_API_KEY_FILE, resolve_openai_api_key
+from utils.openai_config import resolve_openai_api_key
 from vector_retriever import MemorySearchResult, QdrantMemoryRetriever
 
 class OllamaEmbedder:
@@ -148,8 +153,8 @@ class MemoryAwareAgent:
         self.api_key = resolve_openai_api_key(api_key)
         if not self.api_key:
             raise ValueError(
-                "请提供 api_key、设置 OPENAI_API_KEY 环境变量，"
-                f"或在 {DEFAULT_OPENAI_API_KEY_FILE} 写入 API Key"
+                "请提供 api_key，"
+                "或在项目根目录的 .env 中配置 OPENAI_API_KEY"
             )
 
         self.base_url = base_url.rstrip("/")
@@ -331,28 +336,28 @@ class MemoryAwareAgent:
 
 
 class MemoryAgentRunner:
-    """day4 的命令行交互壳。"""
+    """Command-line runner for the Day 4 memory agent."""
 
     def __init__(self, agent: MemoryAwareAgent):
         self.agent = agent
 
     def run(self) -> None:
-        """进入交互循环，不断读取用户输入并分发到不同命令。"""
+        """Start the interactive CLI loop."""
         print("=" * 72)
-        print("🧠 Day4 Agent Memory 演示")
+        print("Day4 Agent Memory Demo")
         print("=" * 72)
-        print("\n可用命令:")
-        print("  help                           - 查看帮助")
-        print("  mode <simple|filtered|hybrid>  - 切换检索模式")
-        print("  remember <text>                - 手动写入长期记忆")
-        print("  remember-as <type> <topic> <text> - 指定类型写入记忆")
-        print("  search <text>                  - 按当前模式检索记忆")
-        print("  searchf <type> <text>          - 过滤检索指定类型")
-        print("  user <user_id>                 - 切换当前用户")
-        print("  clear                          - 清空短期对话历史")
-        print("  prompt <text>                  - 更新系统提示词")
-        print("  quit/exit                      - 退出")
-        print("  <任意文字>                     - 正常聊天，自动检索长期记忆\n")
+        print("\nCommands:")
+        print("  help                              - show help")
+        print("  mode <simple|filtered|hybrid>     - switch retrieval mode")
+        print("  remember <text>                   - save a memory")
+        print("  remember-as <type> <topic> <text> - save memory with metadata")
+        print("  search <text>                     - search memories")
+        print("  searchf <type> <text>             - filtered memory search")
+        print("  user <user_id>                    - switch current user")
+        print("  clear                             - clear short-term history")
+        print("  prompt <text>                     - update system prompt")
+        print("  quit/exit                         - exit")
+        print("  <any text>                        - normal chat with memory\n")
 
         while True:
             try:
@@ -360,50 +365,49 @@ class MemoryAgentRunner:
                 if not user_input:
                     continue
 
-                # 命令判断统一转小写，但真实内容仍然保留原始输入。
                 lower_text = user_input.lower()
                 if lower_text in {"quit", "exit"}:
-                    print("\n👋 再见!")
+                    print("\nBye!")
                     break
 
                 if lower_text == "help":
-                    print("示例: remember 我喜欢中文回答")
-                    print("示例: mode hybrid")
-                    print("示例: search 我喜欢什么样的回答风格\n")
+                    print("Example: remember I prefer concise answers")
+                    print("Example: mode hybrid")
+                    print("Example: search what kind of answer style do I prefer\n")
                     continue
 
                 if lower_text.startswith("mode "):
                     mode = user_input[5:].strip()
                     if mode not in {"simple", "filtered", "hybrid"}:
-                        print("❌ 仅支持 simple / filtered / hybrid\n")
+                        print("[ERROR] Only simple / filtered / hybrid are supported\n")
                         continue
                     self.agent.retrieval_mode = mode
-                    print(f"🔄 当前检索模式: {mode}\n")
+                    print(f"[OK] Current retrieval mode: {mode}\n")
                     continue
 
                 if lower_text.startswith("remember-as "):
                     parts = user_input.split(" ", 3)
                     if len(parts) < 4:
-                        print("❌ 用法: remember-as <type> <topic> <text>\n")
+                        print("[ERROR] Usage: remember-as <type> <topic> <text>\n")
                         continue
                     memory_id = self.agent.remember(
                         content=parts[3],
                         memory_type=parts[1],
                         topic=parts[2],
                     )
-                    print(f"✅ 已写入长期记忆: {memory_id}\n")
+                    print(f"[OK] Saved long-term memory: {memory_id}\n")
                     continue
 
                 if lower_text.startswith("remember "):
                     content = user_input[9:].strip()
                     memory_id = self.agent.remember(content=content)
-                    print(f"✅ 已写入长期记忆: {memory_id}\n")
+                    print(f"[OK] Saved long-term memory: {memory_id}\n")
                     continue
 
                 if lower_text.startswith("searchf "):
                     parts = user_input.split(" ", 2)
                     if len(parts) < 3:
-                        print("❌ 用法: searchf <type> <text>\n")
+                        print("[ERROR] Usage: searchf <type> <text>\n")
                         continue
                     results = self.agent.retrieve_memories(
                         query=parts[2],
@@ -422,45 +426,42 @@ class MemoryAgentRunner:
 
                 if lower_text == "clear":
                     self.agent.clear_history()
-                    print("🗑️ 短期对话历史已清空\n")
+                    print("[OK] Cleared short-term history\n")
                     continue
 
                 if lower_text.startswith("prompt "):
                     self.agent.system_prompt = user_input[7:].strip()
-                    print("📝 系统提示词已更新\n")
+                    print("[OK] System prompt updated\n")
                     continue
 
                 if lower_text.startswith("user "):
                     self.agent.user_id = user_input[5:].strip()
-                    print(f"👤 当前用户切换为: {self.agent.user_id}\n")
+                    print(f"[OK] Switched current user to: {self.agent.user_id}\n")
                     continue
 
-                # 走到这里说明不是命令，而是普通聊天输入。
-                print("\n🤖 Agent 思考中...")
+                print("\n[agent] Thinking...")
                 answer = self.agent.chat(user_input)
                 print(f"AI: {answer}\n")
             except KeyboardInterrupt:
-                print("\n\n👋 再见!")
+                print("\n\nBye!")
                 break
             except Exception as exc:
-                # 这里统一兜底，避免 CLI 因一次错误直接退出。
-                print(f"\n❌ 错误: {exc}\n")
+                print(f"\n[ERROR] {exc}\n")
 
     @staticmethod
     def _print_results(results: List[MemorySearchResult]) -> None:
-        """把检索结果格式化后打印到终端。"""
+        """Print formatted memory search results."""
         if not results:
-            print("📭 没有检索到相关记忆\n")
+            print("[INFO] No related memories found\n")
             return
 
-        print("\n📚 检索结果:")
+        print("\nSearch results:")
         for index, item in enumerate(results, start=1):
             memory_type = item.metadata.get("memory_type", "fact")
             topic = item.metadata.get("topic", "general")
             print(f"  {index}. [{memory_type}/{topic}] score={item.score:.3f}")
             print(f"     {item.content}")
         print()
-
 
 def build_agent() -> MemoryAwareAgent:
     """根据环境变量构造一个可运行的 Agent。"""

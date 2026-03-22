@@ -1,19 +1,20 @@
 #!/usr/bin/env python3
 """
-LLM Agent 模块
-负责与 LLM API 通信，并统一记录请求/响应日志。
+Day 1 LLM agent.
+
+This module wraps a simple chat-completions call and records markdown logs.
+The runtime strings use ASCII-first wording so the script prints cleanly in
+Windows terminals that still default to GBK.
 """
 
 from __future__ import annotations
 
-import os
 import sys
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import requests
-from dotenv import load_dotenv
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
@@ -22,17 +23,15 @@ if str(PROJECT_ROOT) not in sys.path:
 from utils.llm_markdown_logger import get_default_llm_logger
 from utils.openai_config import resolve_openai_api_key
 
-load_dotenv()
-
 llm_logger = get_default_llm_logger()
 
 
 class LLMAgent:
-    """负责调用 LLM API，并维护简单的对话历史。"""
+    """A minimal teaching-friendly LLM agent."""
 
     def __init__(
         self,
-        name: str = "默认助手",
+        name: str = "assistant",
         api_key: Optional[str] = None,
         base_url: str = "https://coding.dashscope.aliyuncs.com/v1",
         model: str = "qwen3.5-plus",
@@ -42,7 +41,9 @@ class LLMAgent:
         self.name = name
         self.api_key = resolve_openai_api_key(api_key)
         if not self.api_key:
-            raise ValueError(f"[{name}] 请提供 api_key 或设置 OPENAI_API_KEY 环境变量")
+            raise ValueError(
+                f"[{name}] Missing api_key. Set OPENAI_API_KEY in the project .env file."
+            )
 
         self.base_url = base_url.rstrip("/")
         self.model = model
@@ -117,7 +118,7 @@ class LLMAgent:
                 error=str(exc),
                 extra={"agent_name": self.name},
             )
-            raise Exception(f"API 调用失败: {exc}") from exc
+            raise Exception(f"API request failed: {exc}") from exc
         except (KeyError, IndexError, ValueError) as exc:
             llm_logger.log_exchange(
                 provider="dashscope-compatible",
@@ -128,7 +129,7 @@ class LLMAgent:
                 error=f"response_parse_error: {exc}",
                 extra={"agent_name": self.name},
             )
-            raise Exception(f"解析响应失败: {exc}") from exc
+            raise Exception(f"Response parse failed: {exc}") from exc
 
     @staticmethod
     def _safe_json(response: Optional[requests.Response]) -> Any:
@@ -146,4 +147,4 @@ class LLMAgent:
         return self.messages.copy()
 
     def get_info(self) -> str:
-        return f"[{self.name}] 模型: {self.model}"
+        return f"[{self.name}] model={self.model}"

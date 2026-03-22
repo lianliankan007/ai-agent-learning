@@ -1,201 +1,152 @@
 #!/usr/bin/env python3
 """
-Agent 运行器模块
-负责管理多个 Agent，处理用户交互
+Day 1 multi-agent runner.
+
+This CLI keeps terminal output ASCII-first to avoid mojibake in GBK-based
+Windows consoles.
 """
 
+from __future__ import annotations
+
 from typing import Dict, Optional
+
 from llm_agent import LLMAgent
 
 
 class AgentRunner:
-    """
-    Agent 运行器类
-    管理多个 Agent，支持切换，处理用户交互
-    """
-    
+    """Manage multiple agents and provide a simple CLI."""
+
     def __init__(self):
-        """初始化 Agent 运行器"""
-        # 存储所有可用的 Agent，用字典管理
         self.agents: Dict[str, LLMAgent] = {}
-        # 当前正在使用的 Agent
         self.current_agent: Optional[LLMAgent] = None
-        # 当前 Agent 的名称
         self.current_agent_name: str = ""
-        # 系统提示词
-        self.system_prompt: str = "你是一个 helpful 的 AI 助手，回答简洁明了。"
-    
+        self.system_prompt: str = "You are a helpful AI assistant. Keep answers clear and short."
+
     def register_agent(self, name: str, agent: LLMAgent) -> None:
-        """
-        注册一个 Agent
-        
-        Args:
-            name: Agent 的名称标识
-            agent: LLMAgent 实例
-        """
         self.agents[name] = agent
-        print(f"✅ 已注册 Agent: {agent.get_info()}")
-    
+        print(f"[OK] Registered agent: {agent.get_info()}")
+
     def switch_agent(self, name: str) -> bool:
-        """
-        切换到指定的 Agent
-        
-        Args:
-            name: Agent 的名称
-            
-        Returns:
-            切换是否成功
-        """
         if name not in self.agents:
-            print(f"❌ Agent '{name}' 不存在，可用 Agent: {list(self.agents.keys())}")
+            print(f"[ERROR] Agent '{name}' not found. Available: {list(self.agents.keys())}")
             return False
-        
+
         self.current_agent = self.agents[name]
         self.current_agent_name = name
-        print(f"🔄 已切换到: {self.current_agent.get_info()}")
+        print(f"[OK] Switched to: {self.current_agent.get_info()}")
         return True
-    
+
     def list_agents(self) -> None:
-        """列出所有可用的 Agent"""
-        print("\n📋 可用 Agent 列表:")
+        print("\nAvailable agents:")
         for name, agent in self.agents.items():
-            marker = " 👈 当前" if name == self.current_agent_name else ""
+            marker = " [current]" if name == self.current_agent_name else ""
             print(f"  - {name}: {agent.get_info()}{marker}")
         print()
-    
+
     def set_system_prompt(self, prompt: str) -> None:
-        """设置系统提示词"""
         self.system_prompt = prompt
-        print(f"📝 系统提示词已更新")
-    
+        print("[OK] System prompt updated")
+
     def chat(self, message: str) -> Optional[str]:
-        """
-        与当前 Agent 对话
-        
-        Args:
-            message: 用户消息
-            
-        Returns:
-            AI 回复内容，如果没有当前 Agent 返回 None
-        """
         if self.current_agent is None:
-            print("❌ 请先切换到一个 Agent (使用 'switch <name>')")
+            print("[ERROR] Switch to an agent first with: switch <name>")
             return None
-        
+
         try:
-            print(f"\n🤖 [{self.current_agent_name}] 思考中...")
-            response = self.current_agent.chat(message, system_prompt=self.system_prompt)
-            return response
-        except Exception as e:
-            print(f"\n❌ 出错: {e}")
+            print(f"\n[{self.current_agent_name}] Thinking...")
+            return self.current_agent.chat(message, system_prompt=self.system_prompt)
+        except Exception as exc:
+            print(f"\n[ERROR] Request failed: {exc}")
             return None
-    
+
     def clear_history(self) -> None:
-        """清空当前 Agent 的对话历史"""
         if self.current_agent:
             self.current_agent.clear_history()
-            print(f"🗑️ [{self.current_agent_name}] 对话历史已清空")
+            print(f"[OK] Cleared history for: {self.current_agent_name}")
         else:
-            print("❌ 没有当前 Agent")
-    
+            print("[ERROR] No current agent")
+
     def run(self) -> None:
-        """启动交互式命令行"""
         print("=" * 60)
-        print("🤖 多 Agent 对话系统")
+        print("Day1 Multi-Agent Chat")
         print("=" * 60)
-        print("\n可用命令:")
-        print("  list              - 列出所有 Agent")
-        print("  switch <name>     - 切换到指定 Agent")
-        print("  clear             - 清空当前 Agent 历史")
-        print("  prompt <text>     - 设置系统提示词")
-        print("  quit/exit         - 退出程序")
-        print("  temperature [0, 2) - 设置代理多样性"  )
-        print("  <任意文字>        - 与当前 Agent 对话\n")
-        
-        # 如果没有 Agent，提示注册
+        print("\nCommands:")
+        print("  list               - list all agents")
+        print("  switch <name>      - switch current agent")
+        print("  clear              - clear current history")
+        print("  prompt <text>      - set system prompt")
+        print("  temperature <num>  - set temperature")
+        print("  quit/exit          - exit")
+        print("  <any text>         - chat with current agent\n")
+
         if not self.agents:
-            print("⚠️ 还没有注册任何 Agent，请先注册 Agent\n")
-        
+            print("[WARN] No agents registered yet\n")
+
         while True:
             try:
-                # 显示当前 Agent 提示符
-                prompt = f"[{self.current_agent_name}]> " if self.current_agent else "[无Agent]> "
+                prompt = f"[{self.current_agent_name}]> " if self.current_agent else "[no-agent]> "
                 user_input = input(prompt).strip()
-                
+
                 if not user_input:
                     continue
-                
-                # 处理命令
-                if user_input.lower() in ["quit", "exit"]:
-                    print("\n👋 再见!")
+
+                lower_text = user_input.lower()
+                if lower_text in {"quit", "exit"}:
+                    print("\nBye!")
                     break
-                
-                elif user_input.lower() == "list":
+                if lower_text == "list":
                     self.list_agents()
-                
-                elif user_input.lower().startswith("switch "):
-                    name = user_input[7:].strip()
-                    self.switch_agent(name)
-                elif user_input.lower().startswith("temperature "):
-                    new_temperature = user_input[12:].strip()
-                    self.current_agent.temperature = float(new_temperature)
-                    print("temperature: ", new_temperature)
-                elif user_input.lower() == "clear":
+                    continue
+                if lower_text.startswith("switch "):
+                    self.switch_agent(user_input[7:].strip())
+                    continue
+                if lower_text.startswith("temperature "):
+                    if self.current_agent is None:
+                        print("[ERROR] Switch to an agent first")
+                        continue
+                    new_temperature = float(user_input[12:].strip())
+                    self.current_agent.temperature = new_temperature
+                    print(f"temperature: {new_temperature}")
+                    continue
+                if lower_text == "clear":
                     self.clear_history()
-                
-                elif user_input.lower().startswith("prompt "):
-                    new_prompt = user_input[7:].strip()
-                    self.set_system_prompt(new_prompt)
-                
-                else:
-                    # 普通对话
-                    response = self.chat(user_input)
-                    if response:
-                        print(f"AI: {response}\n")
-            
+                    continue
+                if lower_text.startswith("prompt "):
+                    self.set_system_prompt(user_input[7:].strip())
+                    continue
+
+                response = self.chat(user_input)
+                if response:
+                    print(f"AI: {response}\n")
             except KeyboardInterrupt:
-                print("\n\n👋 再见!")
+                print("\n\nBye!")
                 break
-            except Exception as e:
-                print(f"\n❌ 错误: {e}\n")
+            except Exception as exc:
+                print(f"\n[ERROR] {exc}\n")
 
 
-def main():
-    """示例用法：创建并运行多个 Agent"""
-    
-    # 创建运行器
+def main() -> None:
     runner = AgentRunner()
-    
-    # 创建第一个 Agent - 通用助手
+
     try:
-        general_agent = LLMAgent(
-            name="通用助手",
-            model="qwen3.5-plus"
-        )
+        general_agent = LLMAgent(name="general-assistant", model="qwen3.5-plus")
         runner.register_agent("general", general_agent)
-    except ValueError as e:
-        print(f"⚠️ 无法创建通用助手: {e}")
-    
-    # 创建第二个 Agent - 代码专家（使用同样的 API Key）
+    except ValueError as exc:
+        print(f"[WARN] Could not create general agent: {exc}")
+
     try:
-        code_agent = LLMAgent(
-            name="代码专家",
-            model="qwen3.5-plus"
-        )
+        code_agent = LLMAgent(name="code-assistant", model="qwen3.5-plus")
         runner.register_agent("code", code_agent)
-    except ValueError as e:
-        print(f"⚠️ 无法创建代码专家: {e}")
-    
-    # 如果有可用的 Agent，默认切换到第一个
+    except ValueError as exc:
+        print(f"[WARN] Could not create code agent: {exc}")
+
     if runner.agents:
         first_agent = list(runner.agents.keys())[0]
         runner.switch_agent(first_agent)
-        
-        # 启动交互
         runner.run()
     else:
-        print("\n❌ 没有可用的 Agent，请检查 API Key 设置")
-        print("设置环境变量: export OPENAI_API_KEY='your-api-key'")
+        print("\n[ERROR] No available agent. Check your API key setup.")
+        print("Set OPENAI_API_KEY in the project .env file.")
 
 
 if __name__ == "__main__":
