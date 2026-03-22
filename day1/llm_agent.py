@@ -20,6 +20,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from utils.llm_markdown_logger import get_default_llm_logger
+from utils.openai_config import resolve_openai_api_key
 
 load_dotenv()
 
@@ -39,7 +40,7 @@ class LLMAgent:
         max_tokens: int = 1000,
     ):
         self.name = name
-        self.api_key = api_key or os.getenv("OPENAI_API_KEY")
+        self.api_key = resolve_openai_api_key(api_key)
         if not self.api_key:
             raise ValueError(f"[{name}] 请提供 api_key 或设置 OPENAI_API_KEY 环境变量")
 

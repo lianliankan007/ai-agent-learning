@@ -32,62 +32,8 @@ import requests
 from qdrant_client import QdrantClient
 from qdrant_client.models import Distance, PointStruct, VectorParams
 
+from utils.openai_config import DEFAULT_OPENAI_API_KEY_FILE, resolve_openai_api_key
 from vector_retriever import MemorySearchResult, QdrantMemoryRetriever
-
-# `BASE_DIR` 指向当前脚本所在目录，也就是 day4 目录。
-BASE_DIR = Path(__file__).resolve().parent
-# `PROJECT_ROOT_DIR` 指向仓库根目录，方便统一查找配置文件。
-PROJECT_ROOT_DIR = BASE_DIR.parent
-# 本地敏感配置约定放在 `.local` 目录下，不提交到 Git。
-LOCAL_CONFIG_DIR = PROJECT_ROOT_DIR / ".local"
-# 默认从这个文件读取 OpenAI API Key。
-DEFAULT_OPENAI_API_KEY_FILE = LOCAL_CONFIG_DIR / "openai_api_key.txt"
-
-
-def _read_secret_file(path: Path) -> Optional[str]:
-    """读取密钥文件并返回去掉空白后的内容。"""
-    # 如果文件不存在，直接返回 None，让上层继续尝试其他来源。
-    if not path.is_file():
-        return None
-    # 使用 `utf-8-sig` 可以兼容带 BOM 的文本文件。
-    value = path.read_text(encoding="utf-8-sig").strip()
-    # 空字符串对上层没有意义，因此统一转成 None。
-    return value or None
-
-
-def resolve_openai_api_key(explicit_api_key: Optional[str] = None) -> Optional[str]:
-    """按优先级解析 API Key。
-
-    优先级从高到低是：
-    1. 显式传入的 `api_key`
-    2. 环境变量 `OPENAI_API_KEY`
-    3. 自定义文件 `OPENAI_API_KEY_FILE`
-    4. 默认文件 `.local/openai_api_key.txt`
-    """
-    # 如果调用方已经显式传参，就优先使用它。
-    if explicit_api_key and explicit_api_key.strip():
-        return explicit_api_key.strip()
-
-    # 第二优先级是环境变量，适合 CI 或本地 shell 配置。
-    env_api_key = os.getenv("OPENAI_API_KEY", "").strip()
-    if env_api_key:
-        return env_api_key
-
-    # 允许通过环境变量指定一个自定义密钥文件路径。
-    custom_file = os.getenv("OPENAI_API_KEY_FILE", "").strip()
-    candidate_files = [Path(custom_file).expanduser()] if custom_file else []
-    # 无论是否传了自定义路径，最后都回退到仓库约定的默认文件。
-    candidate_files.append(DEFAULT_OPENAI_API_KEY_FILE)
-
-    # 依次尝试候选文件，找到第一个可用的值就返回。
-    for path in candidate_files:
-        api_key = _read_secret_file(path)
-        if api_key:
-            return api_key
-
-    # 所有来源都没有拿到时，返回 None 给上层抛错。
-    return None
-
 
 class OllamaEmbedder:
     """负责把文本转换成向量。"""
@@ -531,7 +477,7 @@ def build_agent() -> MemoryAwareAgent:
         embedder=embedder,
         memory_store=memory_store,
         user_id=os.getenv("MEMORY_USER_ID", "default-user"),
-        api_key=os.getenv("OPENAI_API_KEY"),
+        api_key=None,
         base_url=os.getenv("OPENAI_BASE_URL", "https://coding.dashscope.aliyuncs.com/v1"),
         model=os.getenv("OPENAI_MODEL", "qwen3.5-plus"),
     )
