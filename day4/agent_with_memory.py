@@ -11,7 +11,7 @@ day4: 支持长期记忆的 Agent 示例
   OPENAI_API_KEY
   OPENAI_BASE_URL=https://coding.dashscope.aliyuncs.com/v1
   OPENAI_MODEL=qwen3.5-plus
-  OLLAMA_BASE_URL=http://localhost:11434
+  OLLAMA_BASE_URL=http://10.66.131.38:6333
   OLLAMA_EMBED_MODEL=nomic-embed-text
   QDRANT_HOST=localhost
   QDRANT_PORT=6333
@@ -466,7 +466,7 @@ class MemoryAgentRunner:
 def build_agent() -> MemoryAwareAgent:
     """根据环境变量构造一个可运行的 Agent。"""
     embedder = OllamaEmbedder(
-        base_url=os.getenv("OLLAMA_BASE_URL", "http://10.66.131.38:11434"),
+        base_url=os.getenv("OLLAMA_BASE_URL", "http://10.66.131.38:6333"),
         model=os.getenv("OLLAMA_EMBED_MODEL", "nomic-embed-text"),
     )
     memory_store = QdrantMemoryStore(

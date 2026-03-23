@@ -209,6 +209,12 @@ Phase5：完整Agent项目（3周）
 ## 安全与配置建议
 配置应优先从项目根目录的 `.env` 中读取。不要提交真实凭证、生成缓存或 IDE 配置文件。像 `__pycache__/` 这样的临时输出应排除在仓库之外，同时将可复用的默认配置做成可通过环境变量调整的形式。
 
+## LLM Key 获取约定
+- LLM API Key 统一通过 `utils.openai_config.resolve_openai_api_key` 获取。
+- 获取顺序统一为：先使用显式传入的 `api_key`，否则从项目根目录 `.env` 或环境变量中的 `OPENAI_API_KEY` 读取。
+- 如果没有读取到可用的 Key，应在对象初始化阶段直接报错，参考 `day1/llm_agent.py` 与 `day2/day2_llm_agent.py` 的写法。
+- 不要在业务代码里手写重复的 `.env` 解析逻辑，也不要硬编码真实 Key。
+
 
 
 ## 自我激励协议
