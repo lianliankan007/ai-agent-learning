@@ -2,19 +2,35 @@
 """
 Day17: Function Calling 教学 Demo。
 
-这个脚本不接真实大模型 API，而是用教学型“模型决策器”模拟：
-1. 返回普通文本回答
-2. 返回结构化 tool call
-
-目的是先看清 Function Calling 的协议形态，而不是先引入外部依赖。
+这个脚本只使用真实 LLM 生成结构化 tool call。
+获取 API Key 的方式与 Day1、Day2 保持一致：
+- 优先使用显式传入的 api_key
+- 否则通过 utils.openai_config.resolve_openai_api_key 从项目根目录 .env
+  或环境变量中读取 OPENAI_API_KEY
+- 如果没有读取到，就在初始化阶段直接报错
 """
 
 from __future__ import annotations
 
 import json
+import os
 import re
+import sys
+import time
 from dataclasses import dataclass
-from typing import Callable, Dict, Optional
+from pathlib import Path
+from typing import Any, Callable, Dict, Optional
+
+import requests
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from utils.llm_markdown_logger import get_default_llm_logger
+from utils.openai_config import resolve_openai_api_key
+
+llm_logger = get_default_llm_logger()
 
 
 @dataclass
@@ -24,6 +40,16 @@ class ToolSpec:
     name: str
     description: str
     parameters: Dict[str, str]
+
+    def to_prompt_block(self) -> str:
+        """把工具定义整理成适合放进提示词的文本。"""
+        parameter_lines = [f"- {key}: {value}" for key, value in self.parameters.items()]
+        parameters_text = "\n".join(parameter_lines) if parameter_lines else "- 无参数"
+        return (
+            f"工具名: {self.name}\n"
+            f"作用: {self.description}\n"
+            f"参数:\n{parameters_text}"
+        )
 
 
 @dataclass
@@ -42,6 +68,7 @@ class ModelDecision:
     mode: str
     text_answer: Optional[str] = None
     function_call: Optional[FunctionCall] = None
+    source: str = "llm"
 
 
 class DemoToolbox:
@@ -80,6 +107,10 @@ class DemoToolbox:
             ),
         ]
 
+    def get_tool_specs_text(self) -> str:
+        """把所有工具描述拼成一段提示词。"""
+        return "\n\n".join(spec.to_prompt_block() for spec in self.tool_specs)
+
     def calculator(self, expression: str) -> str:
         safe_expression = expression.strip()
         if not re.fullmatch(r"[\d\.\+\-\*\/\(\)\s]+", safe_expression):
@@ -112,98 +143,244 @@ class DemoToolbox:
         return " | ".join(hits)
 
 
-class FunctionCallingModelSimulator:
-    """教学型“模型决策器”。
+class LLMFunctionCallingModel:
+    """使用真实 LLM 生成结构化工具调用。"""
 
-    它模拟真实模型根据工具描述做出两种输出：
-    - 直接文本回答
-    - 结构化 function call
-    """
-
-    def __init__(self, toolbox: DemoToolbox) -> None:
+    def __init__(
+        self,
+        toolbox: DemoToolbox,
+        api_key: Optional[str] = None,
+        base_url: str = "https://coding.dashscope.aliyuncs.com/v1",
+        model: str = "qwen3.5-plus",
+        temperature: float = 0.1,
+        max_tokens: int = 800,
+    ) -> None:
         self.toolbox = toolbox
+        self.api_key = resolve_openai_api_key(api_key)
+        if not self.api_key:
+            raise ValueError(
+                "[Day17FunctionCallingAgent] 请提供 api_key，"
+                "或在项目根目录的 .env 中配置 OPENAI_API_KEY"
+            )
+        self.base_url = base_url.rstrip("/")
+        self.model = model
+        self.temperature = temperature
+        self.max_tokens = max_tokens
+
+    @property
+    def is_available(self) -> bool:
+        """是否已配置可用的 LLM。"""
+        return bool(self.api_key)
 
     def decide(self, user_input: str) -> ModelDecision:
-        text = user_input.strip()
-        lowered = text.lower()
+        """让 LLM 决定是直接回答，还是输出结构化 tool call。"""
+        if not self.is_available:
+            raise RuntimeError("未配置 OPENAI_API_KEY，无法使用真实 LLM 决策。")
 
-        if re.search(r"\d+\s*[\+\-\*\/]\s*\d+", text):
-            expression = self._extract_expression(text)
+        system_prompt = (
+            "你是一个教学型 Function Calling 决策器。\n"
+            "你需要根据用户问题，在“直接回答”与“调用工具”之间做选择。\n"
+            "如果需要调用工具，必须输出结构化 JSON；如果不需要，也必须输出结构化 JSON。\n"
+            "你只能从下面给定的工具里选择，不能编造不存在的工具。\n\n"
+            f"【工具描述】\n{self.toolbox.get_tool_specs_text()}\n\n"
+            "输出 JSON 格式要求如下：\n"
+            "1. 如果需要调用工具：\n"
+            '{"mode":"function_call","tool_name":"工具名","arguments":{"参数名":"参数值"},"reason":"原因"}\n'
+            "2. 如果不需要调用工具：\n"
+            '{"mode":"text_answer","text_answer":"给用户的直接回答"}\n'
+            "不要输出 Markdown 代码块，不要添加额外解释。"
+        )
+        content = self._call_chat(
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_input},
+            ],
+            stage="decision",
+        )
+        data = self._parse_json_object(content)
+        mode = str(data.get("mode", "")).strip()
+
+        if mode == "text_answer":
+            return ModelDecision(
+                mode="text_answer",
+                text_answer=str(data.get("text_answer", "")).strip(),
+                source="llm",
+            )
+
+        if mode == "function_call":
+            tool_name = str(data.get("tool_name", "")).strip()
+            arguments = data.get("arguments", {})
+            reason = str(data.get("reason", "")).strip() or "模型判断需要调用工具。"
+            if tool_name not in self.toolbox.tools:
+                raise ValueError(f"LLM 返回了未知工具: {tool_name}")
+            if not isinstance(arguments, dict):
+                raise ValueError("LLM 返回的 arguments 不是对象。")
+            normalized_arguments = {
+                str(key): str(value)
+                for key, value in arguments.items()
+                if value is not None
+            }
             return ModelDecision(
                 mode="function_call",
                 function_call=FunctionCall(
-                    tool_name="calculator",
-                    arguments={"expression": expression},
-                    reason="问题包含精确计算需求，使用 calculator 更稳定。",
+                    tool_name=tool_name,
+                    arguments=normalized_arguments,
+                    reason=reason,
                 ),
+                source="llm",
             )
 
-        if any(keyword in lowered for keyword in ["rag", "tool use", "memory", "agent loop"]):
-            return ModelDecision(
-                mode="function_call",
-                function_call=FunctionCall(
-                    tool_name="doc_search",
-                    arguments={"query": text},
-                    reason="问题更适合先查资料，再基于资料回答。",
-                ),
-            )
+        raise ValueError(f"LLM 返回了不支持的 mode: {mode}")
 
-        if any(keyword in text for keyword in ["目标", "偏好"]) or any(
-            keyword in lowered for keyword in ["goal", "preference"]
-        ):
-            return ModelDecision(
-                mode="function_call",
-                function_call=FunctionCall(
-                    tool_name="memory_lookup",
-                    arguments={"query": text},
-                    reason="问题在询问长期记忆信息，更适合调用 memory_lookup。",
-                ),
-            )
+    def compose_final_answer(
+        self,
+        user_input: str,
+        function_call: FunctionCall,
+        observation: str,
+    ) -> str:
+        """让 LLM 基于 observation 组织更自然的最终回答。"""
+        if not self.is_available:
+            raise RuntimeError("未配置 OPENAI_API_KEY，无法使用真实 LLM 组织最终回答。")
 
-        return ModelDecision(
-            mode="text_answer",
-            text_answer=(
-                "这是一个可以直接解释的问题，不依赖外部工具。"
-                "系统选择直接回答，避免增加额外调用成本。"
-            ),
+        system_prompt = (
+            "你是一个教学型 AI 助手。\n"
+            "你已经拿到了工具调用结果 observation。\n"
+            "请基于 observation 回答用户问题，并清楚说明：\n"
+            "1. 系统调用了什么工具\n"
+            "2. observation 提供了什么信息\n"
+            "3. 最终结论是什么\n"
+            "请保持中文、结构清晰、适合初学者阅读。"
+        )
+        user_prompt = (
+            f"用户问题: {user_input}\n"
+            f"工具名: {function_call.tool_name}\n"
+            f"工具参数: {json.dumps(function_call.arguments, ensure_ascii=False)}\n"
+            f"observation: {observation}"
+        )
+        return self._call_chat(
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            stage="final_answer",
         )
 
+    def _call_chat(self, messages: list[dict[str, str]], stage: str) -> str:
+        """调用兼容 OpenAI 的聊天接口，并记录日志。"""
+        url = f"{self.base_url}/chat/completions"
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+        }
+        payload = {
+            "model": self.model,
+            "messages": messages,
+            "temperature": self.temperature,
+            "max_tokens": self.max_tokens,
+        }
+
+        try:
+            start_time = time.perf_counter()
+            response = requests.post(url, headers=headers, json=payload, timeout=60)
+            elapsed_ms = (time.perf_counter() - start_time) * 1000
+            response.raise_for_status()
+            result = response.json()
+            llm_logger.log_exchange(
+                provider="dashscope-compatible",
+                model=self.model,
+                endpoint=url,
+                request_payload=payload,
+                request_headers=headers,
+                response_payload=result,
+                status_code=response.status_code,
+                duration_ms=elapsed_ms,
+                extra={"agent_name": "Day17FunctionCallingAgent", "stage": stage},
+            )
+            return result["choices"][0]["message"]["content"]
+        except requests.exceptions.RequestException as exc:
+            response = getattr(exc, "response", None)
+            llm_logger.log_exchange(
+                provider="dashscope-compatible",
+                model=self.model,
+                endpoint=url,
+                request_payload=payload,
+                request_headers=headers,
+                response_payload=self._safe_json(response) if response is not None else None,
+                status_code=response.status_code if response is not None else None,
+                error=str(exc),
+                extra={"agent_name": "Day17FunctionCallingAgent", "stage": stage},
+            )
+            raise RuntimeError(f"LLM 调用失败: {exc}") from exc
+        except (KeyError, IndexError, ValueError) as exc:
+            llm_logger.log_exchange(
+                provider="dashscope-compatible",
+                model=self.model,
+                endpoint=url,
+                request_payload=payload,
+                request_headers=headers,
+                error=f"response_parse_error: {exc}",
+                extra={"agent_name": "Day17FunctionCallingAgent", "stage": stage},
+            )
+            raise RuntimeError(f"LLM 响应解析失败: {exc}") from exc
+
     @staticmethod
-    def _extract_expression(text: str) -> str:
-        match = re.search(r"(\d+(?:\.\d+)?(?:\s*[\+\-\*\/]\s*\d+(?:\.\d+)?)+)", text)
-        if not match:
-            return text
-        return match.group(1)
+    def _parse_json_object(text: str) -> Dict[str, Any]:
+        """从 LLM 输出中提取 JSON 对象。"""
+        cleaned = text.strip()
+        if cleaned.startswith("```"):
+            cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned)
+            cleaned = re.sub(r"\s*```$", "", cleaned)
+        try:
+            return json.loads(cleaned)
+        except json.JSONDecodeError:
+            match = re.search(r"\{.*\}", cleaned, re.S)
+            if not match:
+                raise
+            return json.loads(match.group(0))
+
+    @staticmethod
+    def _safe_json(response: Optional[requests.Response]) -> Any:
+        if response is None:
+            return None
+        try:
+            return response.json()
+        except ValueError:
+            return {"raw_text": response.text}
 
 
 class FunctionCallingAgent:
     """最小 Function Calling Agent。"""
 
-    def __init__(self, toolbox: DemoToolbox, model: FunctionCallingModelSimulator) -> None:
+    def __init__(
+        self,
+        toolbox: DemoToolbox,
+        llm_model: LLMFunctionCallingModel,
+    ) -> None:
         self.toolbox = toolbox
-        self.model = model
+        self.llm_model = llm_model
 
     def handle(self, user_input: str) -> Dict[str, str]:
-        decision = self.model.decide(user_input)
+        decision = self.llm_model.decide(user_input)
+
         if decision.mode == "text_answer":
             return {
                 "mode": "text_answer",
+                "decision_source": decision.source,
                 "model_output": decision.text_answer or "",
                 "final_answer": decision.text_answer or "",
             }
 
         assert decision.function_call is not None
         function_call = decision.function_call
+        if function_call.tool_name not in self.toolbox.tools:
+            raise ValueError(f"工具不存在: {function_call.tool_name}")
         tool = self.toolbox.tools[function_call.tool_name]
-        tool_value = next(iter(function_call.arguments.values()))
+        tool_value = next(iter(function_call.arguments.values()), "")
         observation = tool(tool_value)
-        final_answer = (
-            f"系统先执行了 {function_call.tool_name}，"
-            f"拿到 observation 后，再组织成最终回答。\n"
-            f"observation: {observation}"
-        )
+        final_answer = self.llm_model.compose_final_answer(user_input, function_call, observation)
         return {
             "mode": "function_call",
+            "decision_source": decision.source,
             "model_output": json.dumps(
                 {
                     "tool_name": function_call.tool_name,
@@ -230,6 +407,7 @@ class FunctionCallingRunner:
         print("Day17 Function Calling Agent Demo")
         print("=" * 72)
         print("\n可用命令:")
+        print("  status                    - 查看当前是否启用真实 LLM")
         print("  list-tools                - 查看工具描述")
         print("  ask <问题>                - 运行一次 Function Calling")
         print("  demo-calc                 - 演示计算类调用")
@@ -250,6 +428,10 @@ class FunctionCallingRunner:
                 if lower_text in {"quit", "exit"}:
                     print("\n再见!")
                     break
+
+                if lower_text == "status":
+                    self._print_status()
+                    continue
 
                 if lower_text == "list-tools":
                     self._print_tools()
@@ -295,6 +477,7 @@ class FunctionCallingRunner:
         print(f"[Question] {question}")
         print("=" * 72)
         print(f"模式: {result['mode']}")
+        print(f"决策来源: {result.get('decision_source', 'unknown')}")
         print("\n模型输出:")
         print(result["model_output"])
         if "observation" in result:
@@ -312,11 +495,25 @@ class FunctionCallingRunner:
             print(f"  参数: {json.dumps(spec.parameters, ensure_ascii=False)}")
         print()
 
+    def _print_status(self) -> None:
+        llm_enabled = self.agent.llm_model.is_available
+        print("\n当前模式:")
+        print("  - 当前仅支持真实 LLM Function Calling 链路")
+        print(f"  - 当前真实 LLM 可用: {llm_enabled}")
+        print(f"  - 模型: {self.agent.llm_model.model}")
+        print(f"  - Base URL: {self.agent.llm_model.base_url}")
+        print()
+
 
 def main() -> None:
     toolbox = DemoToolbox()
-    model = FunctionCallingModelSimulator(toolbox)
-    agent = FunctionCallingAgent(toolbox, model)
+    llm_model = LLMFunctionCallingModel(
+        toolbox=toolbox,
+        api_key=None,
+        base_url=os.getenv("OPENAI_BASE_URL", "https://coding.dashscope.aliyuncs.com/v1"),
+        model=os.getenv("OPENAI_MODEL", "qwen3.5-plus"),
+    )
+    agent = FunctionCallingAgent(toolbox, llm_model=llm_model)
     runner = FunctionCallingRunner(agent, toolbox)
     runner.run()
 
