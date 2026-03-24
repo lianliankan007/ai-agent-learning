@@ -440,6 +440,9 @@ class AgentLoopRunner:
             except KeyboardInterrupt:
                 print("\n\n再见!")
                 break
+            except EOFError:
+                print("\n\n检测到输入结束(EOF)，退出。")
+                break
             except Exception as exc:
                 print(f"\n错误: {exc}\n")
 
